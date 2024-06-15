@@ -302,7 +302,10 @@ class Pix2StructImageProcessor(BaseImageProcessor):
         col_ids = col_ids.to(torch.float32)
 
         # [rows * columns, 2 + patch_height * patch_width * image_channels]
-        result = torch.cat([row_ids, col_ids, patches], -1)
+        ## modified ##
+        # result = torch.cat([row_ids, col_ids, patches], -1)
+        result = patches
+        ##############
 
         # [max_patches, 2 + patch_height * patch_width * image_channels]
         result = torch.nn.functional.pad(result, [0, 0, 0, max_patches - (rows * columns)]).float()
