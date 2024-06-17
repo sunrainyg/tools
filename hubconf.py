@@ -1,161 +1,73 @@
-# Copyright 2020 The HuggingFace Team. All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+"""isort:skip_file"""
 
-import os
-import sys
-
-SRC_DIR = os.path.join(os.path.dirname(__file__), "src")
-sys.path.append(SRC_DIR)
+import functools
+import importlib
 
 
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoModelForMaskedLM,
-    AutoModelForQuestionAnswering,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    add_start_docstrings,
+dependencies = [
+    "dataclasses",
+    "hydra",
+    "numpy",
+    "omegaconf",
+    "regex",
+    "requests",
+    "torch",
+]
+
+
+# Check for required dependencies and raise a RuntimeError if any are missing.
+missing_deps = []
+for dep in dependencies:
+    try:
+        importlib.import_module(dep)
+    except ImportError:
+        # Hack: the hydra package is provided under the "hydra-core" name in
+        # pypi. We don't want the user mistakenly calling `pip install hydra`
+        # since that will install an unrelated package.
+        if dep == "hydra":
+            dep = "hydra-core"
+        missing_deps.append(dep)
+if len(missing_deps) > 0:
+    raise RuntimeError("Missing dependencies: {}".format(", ".join(missing_deps)))
+
+
+# only do fairseq imports after checking for dependencies
+from fairseq.hub_utils import (  # noqa; noqa
+    BPEHubInterface as bpe,
+    TokenizerHubInterface as tokenizer,
 )
+from fairseq.models import MODEL_REGISTRY  # noqa
 
 
-dependencies = ["torch", "numpy", "tokenizers", "filelock", "requests", "tqdm", "regex", "sentencepiece", "sacremoses", "importlib_metadata", "huggingface_hub"]
+# torch.hub doesn't build Cython components, so if they are not found then try
+# to build them here
+try:
+    import fairseq.data.token_block_utils_fast  # noqa
+except ImportError:
+    try:
+        import cython  # noqa
+        import os
+        from setuptools import sandbox
+
+        sandbox.run_setup(
+            os.path.join(os.path.dirname(__file__), "setup.py"),
+            ["build_ext", "--inplace"],
+        )
+    except ImportError:
+        print(
+            "Unable to build Cython components. Please make sure Cython is "
+            "installed if the torch.hub model you are loading depends on it."
+        )
 
 
-@add_start_docstrings(AutoConfig.__doc__)
-def config(*args, **kwargs):
-    r"""
-                # Using torch.hub !
-                import torch
-
-                config = torch.hub.load('huggingface/transformers', 'config', 'bert-base-uncased')  # Download configuration from huggingface.co and cache.
-                config = torch.hub.load('huggingface/transformers', 'config', './test/bert_saved_model/')  # E.g. config (or model) was saved using `save_pretrained('./test/saved_model/')`
-                config = torch.hub.load('huggingface/transformers', 'config', './test/bert_saved_model/my_configuration.json')
-                config = torch.hub.load('huggingface/transformers', 'config', 'bert-base-uncased', output_attentions=True, foo=False)
-                assert config.output_attentions == True
-                config, unused_kwargs = torch.hub.load('huggingface/transformers', 'config', 'bert-base-uncased', output_attentions=True, foo=False, return_unused_kwargs=True)
-                assert config.output_attentions == True
-                assert unused_kwargs == {'foo': False}
-
-            """
-
-    return AutoConfig.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoTokenizer.__doc__)
-def tokenizer(*args, **kwargs):
-    r"""
-        # Using torch.hub !
-        import torch
-
-        tokenizer = torch.hub.load('huggingface/transformers', 'tokenizer', 'bert-base-uncased')    # Download vocabulary from huggingface.co and cache.
-        tokenizer = torch.hub.load('huggingface/transformers', 'tokenizer', './test/bert_saved_model/')  # E.g. tokenizer was saved using `save_pretrained('./test/saved_model/')`
-
-    """
-
-    return AutoTokenizer.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoModel.__doc__)
-def model(*args, **kwargs):
-    r"""
-            # Using torch.hub !
-            import torch
-
-            model = torch.hub.load('huggingface/transformers', 'model', 'bert-base-uncased')    # Download model and configuration from huggingface.co and cache.
-            model = torch.hub.load('huggingface/transformers', 'model', './test/bert_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
-            model = torch.hub.load('huggingface/transformers', 'model', 'bert-base-uncased', output_attentions=True)  # Update configuration during loading
-            assert model.config.output_attentions == True
-            # Loading from a TF checkpoint file instead of a PyTorch model (slower)
-            config = AutoConfig.from_pretrained('./tf_model/bert_tf_model_config.json')
-            model = torch.hub.load('huggingface/transformers', 'model', './tf_model/bert_tf_checkpoint.ckpt.index', from_tf=True, config=config)
-
-        """
-
-    return AutoModel.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoModelForCausalLM.__doc__)
-def modelForCausalLM(*args, **kwargs):
-    r"""
-        # Using torch.hub !
-        import torch
-
-        model = torch.hub.load('huggingface/transformers', 'modelForCausalLM', 'gpt2')    # Download model and configuration from huggingface.co and cache.
-        model = torch.hub.load('huggingface/transformers', 'modelForCausalLM', './test/saved_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
-        model = torch.hub.load('huggingface/transformers', 'modelForCausalLM', 'gpt2', output_attentions=True)  # Update configuration during loading
-        assert model.config.output_attentions == True
-        # Loading from a TF checkpoint file instead of a PyTorch model (slower)
-        config = AutoConfig.from_pretrained('./tf_model/gpt_tf_model_config.json')
-        model = torch.hub.load('huggingface/transformers', 'modelForCausalLM', './tf_model/gpt_tf_checkpoint.ckpt.index', from_tf=True, config=config)
-
-    """
-    return AutoModelForCausalLM.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoModelForMaskedLM.__doc__)
-def modelForMaskedLM(*args, **kwargs):
-    r"""
-            # Using torch.hub !
-            import torch
-
-            model = torch.hub.load('huggingface/transformers', 'modelForMaskedLM', 'bert-base-uncased')    # Download model and configuration from huggingface.co and cache.
-            model = torch.hub.load('huggingface/transformers', 'modelForMaskedLM', './test/bert_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
-            model = torch.hub.load('huggingface/transformers', 'modelForMaskedLM', 'bert-base-uncased', output_attentions=True)  # Update configuration during loading
-            assert model.config.output_attentions == True
-            # Loading from a TF checkpoint file instead of a PyTorch model (slower)
-            config = AutoConfig.from_pretrained('./tf_model/bert_tf_model_config.json')
-            model = torch.hub.load('huggingface/transformers', 'modelForMaskedLM', './tf_model/bert_tf_checkpoint.ckpt.index', from_tf=True, config=config)
-
-        """
-
-    return AutoModelForMaskedLM.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoModelForSequenceClassification.__doc__)
-def modelForSequenceClassification(*args, **kwargs):
-    r"""
-            # Using torch.hub !
-            import torch
-
-            model = torch.hub.load('huggingface/transformers', 'modelForSequenceClassification', 'bert-base-uncased')    # Download model and configuration from huggingface.co and cache.
-            model = torch.hub.load('huggingface/transformers', 'modelForSequenceClassification', './test/bert_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
-            model = torch.hub.load('huggingface/transformers', 'modelForSequenceClassification', 'bert-base-uncased', output_attentions=True)  # Update configuration during loading
-            assert model.config.output_attentions == True
-            # Loading from a TF checkpoint file instead of a PyTorch model (slower)
-            config = AutoConfig.from_pretrained('./tf_model/bert_tf_model_config.json')
-            model = torch.hub.load('huggingface/transformers', 'modelForSequenceClassification', './tf_model/bert_tf_checkpoint.ckpt.index', from_tf=True, config=config)
-
-        """
-
-    return AutoModelForSequenceClassification.from_pretrained(*args, **kwargs)
-
-
-@add_start_docstrings(AutoModelForQuestionAnswering.__doc__)
-def modelForQuestionAnswering(*args, **kwargs):
-    r"""
-        # Using torch.hub !
-        import torch
-
-        model = torch.hub.load('huggingface/transformers', 'modelForQuestionAnswering', 'bert-base-uncased')    # Download model and configuration from huggingface.co and cache.
-        model = torch.hub.load('huggingface/transformers', 'modelForQuestionAnswering', './test/bert_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
-        model = torch.hub.load('huggingface/transformers', 'modelForQuestionAnswering', 'bert-base-uncased', output_attentions=True)  # Update configuration during loading
-        assert model.config.output_attentions == True
-        # Loading from a TF checkpoint file instead of a PyTorch model (slower)
-        config = AutoConfig.from_pretrained('./tf_model/bert_tf_model_config.json')
-        model = torch.hub.load('huggingface/transformers', 'modelForQuestionAnswering', './tf_model/bert_tf_checkpoint.ckpt.index', from_tf=True, config=config)
-
-    """
-    return AutoModelForQuestionAnswering.from_pretrained(*args, **kwargs)
+# automatically expose models defined in FairseqModel::hub_models
+for _model_type, _cls in MODEL_REGISTRY.items():
+    for model_name in _cls.hub_models().keys():
+        globals()[model_name] = functools.partial(
+            _cls.from_pretrained,
+            model_name,
+        )
