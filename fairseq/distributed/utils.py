@@ -603,7 +603,7 @@ def all_gather(tensor, group, return_tensor=False):
             return tensor_list
 
 
-def all_gather_list(data, group=None, max_size=16384):
+def all_gather_list(data, group=None, max_size=96384):
     """Gathers arbitrary data from all nodes into a list.
 
     Similar to :func:`~torch.distributed.all_gather` but for arbitrary Python
