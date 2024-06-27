@@ -617,7 +617,7 @@ def all_gather_list(data, group=None, max_size=96384):
             across workers
     """
     from fairseq import utils
-
+    max_size=96384
     if group is None:
         group = get_global_group()
     rank = get_rank(group=group)
