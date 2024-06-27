@@ -325,14 +325,14 @@ def distributed_init(cfg: FairseqConfig):
     return cfg.distributed_training.distributed_rank
 
 
-def distributed_main(i, main, cfg: FairseqConfig, kwargs):
-    cfg.distributed_training.device_id = i
+def distributed_main(main, cfg: FairseqConfig, **kwargs):
+    local_rank = int(os.environ['LOCAL_RANK'])
+    cfg.distributed_training.device_id = local_rank
+    
     if torch.cuda.is_available() and not cfg.common.cpu and not cfg.common.tpu:
         torch.cuda.set_device(cfg.distributed_training.device_id)
-    if cfg.distributed_training.distributed_rank is None:  # torch.multiprocessing.spawn
-        cfg.distributed_training.distributed_rank = kwargs.pop("start_rank", 0) + i
-
-    cfg.distributed_training.distributed_rank = distributed_init(cfg)
+    
+    distributed_init(cfg)  # Assuming this initializes the distributed environment correctly
 
     after_distributed_init_fn = kwargs.pop("after_distributed_init_fn", None)
     if after_distributed_init_fn:
@@ -341,45 +341,24 @@ def distributed_main(i, main, cfg: FairseqConfig, kwargs):
     main(cfg, **kwargs)
 
     if torch.distributed.is_initialized():
-        torch.distributed.barrier(get_global_group())
+        torch.distributed.barrier()  # Ensures that all processes wait for each other before exiting
 
 
 def call_main(cfg: FairseqConfig, main, **kwargs):
     if cfg.distributed_training.distributed_init_method is None:
         infer_init_method(cfg.distributed_training)
 
-    if cfg.distributed_training.distributed_init_method is not None:
-        # distributed training
-        if not cfg.distributed_training.distributed_no_spawn:
-            start_rank = cfg.distributed_training.distributed_rank
-            cfg.distributed_training.distributed_rank = None  # assign automatically
-            kwargs["start_rank"] = start_rank
-            torch.multiprocessing.spawn(
-                fn=distributed_main,
-                args=(main, cfg, kwargs),
-                nprocs=min(
-                    torch.cuda.device_count(),
-                    cfg.distributed_training.distributed_world_size,
-                ),
-                join=True,
-            )
-        else:
-            distributed_main(cfg.distributed_training.device_id, main, cfg, kwargs)
-    elif cfg.common.tpu and cfg.distributed_training.distributed_world_size > 1:
+    if cfg.common.tpu and cfg.distributed_training.distributed_world_size > 1:
         import torch_xla.distributed.xla_multiprocessing as xmp
-
         torch.multiprocessing.set_sharing_strategy("file_system")
         xmp.spawn(
             fn=distributed_main,
             args=(main, cfg, kwargs),
-            # tpu-comment:
-            #   8 devices in one TPU VM, is the max processes to be spawned.
-            #   The rest is driven by xm.distributed.xla_dist
             nprocs=min(cfg.distributed_training.distributed_world_size, 8),
         )
     else:
-        # single GPU main
-        main(cfg, **kwargs)
+        # Either single GPU or using torchrun for multi-GPU
+        distributed_main(main, cfg, **kwargs)
 
 
 def use_xla():
