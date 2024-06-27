@@ -24,12 +24,40 @@ from fairseq.file_io import PathManager
 from fairseq.logging import meters, metrics
 from fairseq.nan_detector import NanDetector
 from fairseq.optim import lr_scheduler
+from torchscale.component.xmoe.global_groups import get_moe_group, _find_my_group_index
+import torch.distributed as dist
 
 from omegaconf import OmegaConf
 import re
 
 logger = logging.getLogger(__name__)
 
+
+def get_zero_group(num_gpus):
+    if torch.distributed.is_initialized():
+        if not hasattr(get_zero_group, "_zero_groups"):
+            world_size = distributed_utils.get_global_world_size()
+
+            assert world_size % num_gpus == 0
+            ranks_per_group = world_size // num_gpus
+            zero_groups = [[i * num_gpus + j for j in range(num_gpus)]
+                                for i in range(ranks_per_group)]
+
+            get_zero_group._zero_group_idx = zero_groups
+            get_zero_group._zero_groups = [dist.new_group(g) for g in zero_groups]
+
+        my_group_idx = _find_my_group_index(get_zero_group._zero_group_idx)
+        return get_zero_group._zero_groups[my_group_idx]
+
+def get_zero_local_rank(num_gpus):
+    if torch.distributed.is_initialized():
+        ddp_rank = distributed_utils.get_data_parallel_rank()
+        return ddp_rank % num_gpus
+
+def get_zero_local_group(num_gpus):
+    if torch.distributed.is_initialized():
+        ddp_rank = distributed_utils.get_data_parallel_rank()
+        return ddp_rank // num_gpus
 
 class Trainer(object):
     """Main class for data parallel training.
@@ -134,6 +162,24 @@ class Trainer(object):
         self._wrapped_criterion = None
         self._wrapped_model = None
 
+        if self.cfg.distributed_training.zero_sharding == "os":
+            if self.is_moe:
+                _, self.expert_group = get_moe_group(self.cfg.model.moe_expert_count)
+            else:
+                # self.expert_group = get_zero_group(torch.cuda.device_count() * 2)
+                # self.data_parallel_process_group
+                # self.expert_group = self.data_parallel_process_group
+                if self.cfg.distributed_training.zero_group_size > 0:
+                    gpus_per_group = torch.cuda.device_count() * self.cfg.distributed_training.zero_group_size
+                    self.zero_group_local_rank = get_zero_local_rank(gpus_per_group)
+                    self.zero_group_local_group = get_zero_local_group(gpus_per_group)
+                    self.expert_group = get_zero_group(gpus_per_group)
+                else:
+                    gpus_per_group = self.data_parallel_world_size
+                    self.zero_group_local_rank = get_zero_local_rank(gpus_per_group)
+                    self.zero_group_local_group = get_zero_local_group(gpus_per_group)
+                    self.expert_group = self.data_parallel_process_group
+
         # TODO(myleott): support tpu
         if self.cuda and self.data_parallel_world_size > 1:
             self._grad_norm_buf = torch.cuda.DoubleTensor(self.data_parallel_world_size)
@@ -208,7 +254,11 @@ class Trainer(object):
     def should_save_checkpoint_on_current_rank(self) -> bool:
         """Indicates whether to save checkpoints on the current DDP rank."""
         has_alt_ffn_dim = getattr(self.cfg.model, "alternate_decoder_ffn_embed_dim", 0) != 0
-        if (self.is_fsdp or (self.is_moe and not has_alt_ffn_dim) or
+        if self.cfg.distributed_training.zero_sharding == "os" and self.cfg.distributed_training.save_zero_ckpt_fast:
+            if self.zero_group_local_group == 0:
+                return True
+            return False
+        elif (self.is_fsdp or (self.is_moe and not has_alt_ffn_dim and self.data_parallel_rank < self.cfg.model.moe_expert_count) or
                 getattr(self.cfg.model, "base_layers", 0) > 0):
             return True
         else:
@@ -332,7 +382,7 @@ class Trainer(object):
                     "Please use --fp16-no-flatten-grads"
                 )
             else:
-                optim.shard_(self._optimizer, self.data_parallel_process_group)
+                optim.shard_(self._optimizer, self.expert_group)
 
         # We should initialize the learning rate scheduler immediately after
         # building the optimizer, so that the initial learning rate is set.
@@ -351,10 +401,6 @@ class Trainer(object):
         return getattr(self.cfg.model, "moe_freq", 0) > 0
 
     @property
-    def is_quips(self):
-        return getattr(self.cfg.model, "quip_sharp", False)
-
-    @property
     def is_base_moe(self) -> bool:
         return getattr(self.cfg.model, "base_layers", 0) > 0
     def use_sharded_state(self):
@@ -364,6 +410,8 @@ class Trainer(object):
         """For OSS, we need to consolidate the state dict."""
         self._gathered_optim_state = None
         if self.cfg.checkpoint.no_save_optimizer_state:
+            return
+        if self.cfg.distributed_training.save_zero_ckpt_fast:
             return
         if hasattr(self.optimizer.optimizer, "consolidate_state_dict"):
             self.optimizer.optimizer.consolidate_state_dict()
@@ -375,7 +423,25 @@ class Trainer(object):
             assert self._gathered_optim_state is not None
 
     def state_dict(self, filename, training_finished=False) -> Dict[str, Dict]:
-        if self.is_moe or self.is_base_moe:
+        if self.cfg.distributed_training.zero_sharding == 'os' and self.cfg.distributed_training.save_zero_ckpt_fast:
+            model_state_dict = self.model.state_dict() if self.zero_group_local_rank == 0 else {}
+            filename = filename.replace('.pt', f'-zero-{self.zero_group_local_rank}.pt')
+
+            optim_state = None
+            if not self.cfg.checkpoint.no_save_optimizer_state:
+                # optim_state = self._gathered_optim_state or self.optimizer.state_dict()
+                optim_state = getattr(self, '_gathered_optim_state', None) or self.optimizer.state_dict()
+                if self.zero_group_local_rank > 0:
+                    optim_state["global_optim_state"] = {}
+                    optim_state["_partition_parameters_cache"] = {}
+                    optim_state["_param_to_index"] = {}
+
+            model_save_list = [(
+                filename,
+                model_state_dict,
+                optim_state,
+            )]
+        elif self.is_moe or self.is_base_moe:
             (
                 (shared_model_state_dict, shared_optimizer_state_dict),
                 (expert_model_state_dict, expert_optimizer_state_dict),
@@ -524,7 +590,6 @@ class Trainer(object):
                     filename,
                     load_on_all_ranks=load_on_all_ranks,
                     is_moe=self.is_moe or self.is_base_moe,
-                    is_quips=self.is_quips,
                 )
                 last_optim_state = state.get("last_optimizer_state", None)
                 if last_optim_state == -1:
@@ -615,10 +680,6 @@ class Trainer(object):
 
         if extra_state is not None:
             itr_state = extra_state["train_iterator"]
-            # if type(itr_state) == list:
-            #     # assert len(itr_state) == self.data_parallel_world_size
-            #     itr_state = itr_state[self.data_parallel_rank]
-            #     extra_state["train_iterator"] = itr_state
             if type(itr_state) == list:
                 # assert len(itr_state) == self.data_parallel_world_size
                 if len(itr_state) != self.data_parallel_world_size:
@@ -931,7 +992,7 @@ class Trainer(object):
         except FloatingPointError:
             # re-run the forward and backward pass with hooks attached to print
             # out where it fails
-            self.save_checkpoint('/mnt/msranlpintern/debug.pt', {})
+            # self.save_checkpoint('/mnt/msranlpintern/debug.pt', {})
             self.zero_grad()
             with NanDetector(self.get_model()):
                 for _, sample in enumerate(samples):

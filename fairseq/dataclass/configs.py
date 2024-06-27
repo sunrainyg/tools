@@ -238,7 +238,7 @@ class DistributedTrainingConfig(FairseqDataclass):
         default=0,
         metadata={
             "help": "which GPU to use (usually configured automatically)",
-            "argparse_alias": "--local_rank",
+            "argparse_alias": "--local-rank",
         },
     )
     distributed_no_spawn: bool = field(
@@ -367,6 +367,12 @@ class DistributedTrainingConfig(FairseqDataclass):
     )
     zero_sharding: ZERO_SHARDING_CHOICES = field(
         default="none", metadata={"help": "ZeRO sharding"}
+    )
+    zero_group_size: Optional[int] = field(
+        default=-1, metadata={"help": "Size for group zero"}
+    )
+    save_zero_ckpt_fast: bool = field(
+        default=False
     )
     fp16: bool = II("common.fp16")
     memory_efficient_fp16: bool = II("common.memory_efficient_fp16")
@@ -931,10 +937,6 @@ class CommonEvalConfig(FairseqDataclass):
 
 @dataclass
 class EvalLMConfig(FairseqDataclass):
-    is_quips: bool = field(
-        default=False,
-        metadata={"help": ""},
-    )
     input_quant_method: str = field(
         default="",
         metadata={"help": ""},
